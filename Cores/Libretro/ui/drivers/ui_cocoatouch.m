@@ -15,7 +15,7 @@
 
 /* Gamuroid: upstream libretro/RetroArch ui_cocoatouch.m (master 57acb067b8cc, GPLv3)
  * plus the embedded host used by the Libretro framework. With
- * GAMUROID_EMBEDDED_HOST RetroArch_iOS is an object owned by LibretroCore, never the
+ * GAMUROID_EMBEDDED_HOST RetroArch_iOS is an object owned by GamuroidRetroHost, never the
  * application delegate: no main(), the frame driver is the main run-loop observer below,
  * and the host API (declared in cocoa/gamuroid_embedded_host.h) drives one session at a
  * time on the main thread. */
@@ -64,7 +64,7 @@
 #endif
 
 #ifdef GAMUROID_EMBEDDED_HOST
-#import "cocoa/LibretroCore.h"
+#import "cocoa/GamuroidRetroHost.h"
 #endif
 #include "../../runloop.h"
 #include "../../driver.h"
@@ -779,8 +779,8 @@ enum
 #endif
 }
 #ifdef GAMUROID_EMBEDDED_HOST
-/* The host instance belongs to the LibretroCore bridge (nil on the simulator). */
-+ (RetroArch_iOS*)get { return (RetroArch_iOS*)[LibretroCore sharedInstance].retroArch_iOS; }
+/* The host instance belongs to the GamuroidRetroHost bridge (nil on the simulator). */
++ (RetroArch_iOS*)get { return (RetroArch_iOS*)[GamuroidRetroHost sharedInstance].retroArch_iOS; }
 #else
 + (RetroArch_iOS*)get { return (RetroArch_iOS*)[[UIApplication sharedApplication] delegate]; }
 #endif
@@ -1300,7 +1300,7 @@ static void mark_libretro_stopped(void) {
  *   cleared by main_exit() (retroarch_deinit_drivers), so it is not touched here;
  * - needToLoadStatePath from -reloadByKeepState: while paused: -resume would load that state into
  *   the next session's game.
- * needToLoadStateDelay is left as is: it is configuration that PlayViewController sets once per
+ * needToLoadStateDelay is left as is: it is configuration that GamuroidPlayScreen sets once per
  * controller (loadConfig) and its in-controller launch retries reuse. */
 static void reset_libretro_session_frontend_state(void)
 {
@@ -1326,7 +1326,7 @@ static void reset_libretro_session_frontend_state(void)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wnullability-completeness"
 
-/* Session API used by the LibretroCore bridge. Every method runs on
+/* Session API used by the GamuroidRetroHost bridge. Every method runs on
  * the main thread; completions are delivered on the main queue. */
 
 /* A session is initialized and no stop is in progress. */
@@ -1559,7 +1559,7 @@ static UIImage *gamuroid_image_from_viewport_pixels(const uint8_t *bgr, size_t w
 
 #pragma mark Session lifecycle
 
-- (void)hostBeginSessionWithSaveDir:(NSString *)customSaveDir
+- (void)hostBeginSessionWithSaveDir:(NSString *)saveFolderOverride
 {
    char program[]        = "retroarch";
    char *argv[]          = { program, NULL };
@@ -1610,7 +1610,7 @@ static UIImage *gamuroid_image_from_viewport_pixels(const uint8_t *bgr, size_t w
    /* The next RetroArch init must run the joypad driver init again. */
    gamupad_host_reset();
 
-   gamuroid_set_custom_save_dir(customSaveDir.length > 0 ? customSaveDir.UTF8String : NULL);
+   gamuroid_set_custom_save_dir(saveFolderOverride.length > 0 ? saveFolderOverride.UTF8String : NULL);
 
    /* Without the menu these flags survive main_exit(); a stale one ends every
     * later session at once. */
@@ -1748,7 +1748,7 @@ static BOOL gamuroid_host_dummy_core_loaded(void)
    return runloop_state_get_ptr()->current_core_type == CORE_TYPE_DUMMY;
 }
 
-- (BOOL)hostOpenContent:(NSString *)gamePath
+- (BOOL)hostOpenContent:(NSString *)contentLocation
                withCore:(NSString *)corePath
              completion:(void (^)(NSDictionary *))completion
 {
@@ -1767,18 +1767,18 @@ static BOOL gamuroid_host_dummy_core_loaded(void)
 
    loaded = task_push_load_new_core(corePath.UTF8String, NULL, &info, CORE_TYPE_PLAIN, NULL, NULL);
    if (loaded)
-      loaded = task_push_load_content_with_core(gamePath.UTF8String, &info, CORE_TYPE_PLAIN, NULL, NULL);
+      loaded = task_push_load_content_with_core(contentLocation.UTF8String, &info, CORE_TYPE_PLAIN, NULL, NULL);
    /* RetroArch can fall back to the dummy core silently: a bad ROM must fail. */
    if (!loaded || gamuroid_host_dummy_core_loaded())
    {
       NSLog(@"[LibretroHost] content load failed core=%@ content=%@",
-            corePath.lastPathComponent, gamePath.lastPathComponent);
+            corePath.lastPathComponent, contentLocation.lastPathComponent);
       if (completion)
          completion(nil);
       return NO;
    }
 
-   self.hostContentPath = gamePath;
+   self.hostContentPath = contentLocation;
    self.hostCorePath = corePath;
 
    runloop_st = runloop_state_get_ptr();
@@ -1792,7 +1792,7 @@ static BOOL gamuroid_host_dummy_core_loaded(void)
       dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
          NSString *gameCode = gamuroid_newest_ini_name(cheats);
          dispatch_async(dispatch_get_main_queue(), ^{
-            completion(gameCode ? @{ @"PSPGameCode": gameCode } : nil);
+            completion(gameCode ? @{ @"pspDiscSerial": gameCode } : nil);
          });
       });
       return YES;
@@ -1841,8 +1841,8 @@ static BOOL gamuroid_host_dummy_core_loaded(void)
          completion(nil);
       return NO;
    }
-   for (NSString *romPath in romPaths)
-      content_add_subsystem(romPath.UTF8String);
+   for (NSString *contentFilePath in romPaths)
+      content_add_subsystem(contentFilePath.UTF8String);
 
    loaded = task_push_load_subsystem_with_core(NULL, &info, CORE_TYPE_PLAIN, NULL, NULL);
    loaded = loaded

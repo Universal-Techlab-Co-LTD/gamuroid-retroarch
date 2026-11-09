@@ -1,7 +1,7 @@
-// LibretroCore.h — Gamuroid.
+// GamuroidRetroHost.h — Gamuroid.
 //
 // Public Objective-C interface of the Libretro framework: the app talks to RetroArch only through the
-// LibretroCore singleton declared here. This header must not include any RetroArch header.
+// GamuroidRetroHost singleton declared here. This header must not include any RetroArch header.
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
@@ -10,12 +10,12 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Notifications (string value = symbol name; posted async on the main queue, object nil)
 
-// Also exported by LibretroCore.m (observed by raw string, not declared here):
-//   LibretroDidShutdownNotification   - a core sent RETRO_ENVIRONMENT_SHUTDOWN
-//   DidConnectToWFCNotification       - melonDS Wi-Fi Connection state "Associated"
-//   DidDisconnectFromWFCNotification  - any other melonDS Wi-Fi Connection state
+// Also exported by GamuroidRetroHost.m (observed by raw string, not declared here):
+//   GamuroidRetroHostDidStopNotification   - a core sent RETRO_ENVIRONMENT_SHUTDOWN
+//   GamuroidWFCOnlineNotification       - melonDS Wi-Fi Connection state "Associated"
+//   GamuroidWFCOfflineNotification  - any other melonDS Wi-Fi Connection state
 
-extern NSString * const MAMEGameFileMissingNotification;
+extern NSString * const GamuroidCoreFilesMissingNotification;
 extern NSString * const LibretroSaveStateRevisionMismatchNotification;
 extern NSString * const LibretroSaveStateLoadFailedNotification;
 
@@ -63,28 +63,28 @@ typedef NS_ENUM(NSUInteger, LibretroAzaharAcceptedInput) {
 /// Copy of one keyboard request from the Azahar core. The bridge fills every property.
 @interface LibretroAzaharKeyboardConfig : NSObject
 @property (nonatomic, assign) LibretroAzaharButtonConfig buttonConfig;
-@property (nonatomic, assign) LibretroAzaharAcceptedInput acceptedInput;
-@property (nonatomic) BOOL multilineMode;
+@property (nonatomic, assign) LibretroAzaharAcceptedInput allowedEntry;
+@property (nonatomic) BOOL allowsLineBreaks;
 /// In UTF-16 code units.
 @property (nonatomic) NSInteger maxTextLength;
-@property (nonatomic) NSInteger maxDigits;
+@property (nonatomic) NSInteger digitLimit;
 @property (nonatomic, assign) NSInteger okButtonIndex;  // Single=0, Dual=1, Triple=2
 /// Prompt text; empty string when the core gave none.
 @property (nonatomic, copy, nullable) NSString *hintText;
 /// Button captions; exactly as many entries as the core announced.
 @property (nonatomic, copy, nullable) NSArray<NSString *> *buttonText;
-@property (nonatomic) BOOL preventDigit;
-@property (nonatomic) BOOL preventAt;
-@property (nonatomic) BOOL preventPercent;
-@property (nonatomic) BOOL preventBackslash;
-@property (nonatomic) BOOL preventProfanity;
-@property (nonatomic) BOOL enableCallback;
+@property (nonatomic) BOOL blocksDigits;
+@property (nonatomic) BOOL blocksAtSign;
+@property (nonatomic) BOOL blocksPercent;
+@property (nonatomic) BOOL blocksBackslash;
+@property (nonatomic) BOOL blocksProfanity;
+@property (nonatomic) BOOL callbackActive;
 @end
 
 #pragma mark - Bridge
 
 /// Single process-wide bridge to RetroArch. Every method is called on the main thread.
-@interface LibretroCore : NSObject
+@interface GamuroidRetroHost : NSObject
 
 /// The RetroArch host object (RetroArch_iOS). nil on the simulator.
 @property (nonatomic, strong, nullable) id retroArch_iOS;
@@ -92,7 +92,7 @@ typedef NS_ENUM(NSUInteger, LibretroAzaharAcceptedInput) {
 @property(nonatomic, assign, readonly) BOOL isLibretroInitialized;
 @property(nonatomic, assign, readonly) BOOL isLibretroStopping;
 @property(nonatomic, assign, readonly) BOOL isCoreReadyForContentLoad;
-@property(nonatomic, assign, readonly) BOOL isCoreRunning;
+@property(nonatomic, assign, readonly) BOOL coreLoopRunning;
 @property(nonatomic, assign, readonly) unsigned long long videoFrameCount;
 /// The one bridge object. Alias of the process-wide instance; it is created on first use.
 + (instancetype)sharedInstance;
@@ -112,8 +112,8 @@ typedef NS_ENUM(NSUInteger, LibretroAzaharAcceptedInput) {
 - (void)pointerUp NS_SWIFT_NAME(pointerUp());
 /// PlayStation pad analog mode on or off.
 - (void)setPlayStationAnalogMode:(BOOL)analog NS_SWIFT_NAME(setPlayStationAnalogMode(_:));
-- (void)setEnableRumble:(BOOL)enable;
-- (BOOL)getSensorEnable:(int)playerIndex;
+- (void)setRumbleOn:(BOOL)enable;
+- (BOOL)motionSensorsOn:(int)playerIndex NS_SWIFT_NAME(motionSensorsOn(_:));
 
 #pragma mark Options
 
@@ -128,13 +128,13 @@ typedef NS_ENUM(NSUInteger, LibretroAzaharAcceptedInput) {
     NS_SWIFT_NAME(applyLiveOptions(_:flush:));
 /// Frontend (retroarch.cfg) settings.
 - (void)setFrontendSetting:(NSString *)key value:(NSString *)value NS_SWIFT_NAME(setFrontendSetting(_:value:));
-- (void)updateLibretroConfigs:(NSDictionary<NSString *, NSString *> *)configs;
-- (NSString *)coreConfigValue:(NSString *)coreName key:(NSString *)key;
-- (NSString *)libretroConfigValue:(NSString *)key;
+- (void)applyRetroOptions:(NSDictionary<NSString *, NSString *> *)configs;
+- (NSString *)coreOptionValue:(NSString *)coreName key:(NSString *)key;
+- (NSString *)retroOptionValue:(NSString *)key;
 /// Tells the running core that its option list changed.
 - (void)markCoreOptionsDirty NS_SWIFT_NAME(markCoreOptionsDirty());
-- (void)setReloadDelay:(double)delay;
-- (void)setCustomSaveExtension:(NSString * _Nullable)customSaveExtension;
+- (void)setRestoreDelay:(double)delay;
+- (void)setSaveSuffixOverride:(NSString * _Nullable)saveSuffixOverride;
 
 #pragma mark Discs
 
@@ -182,7 +182,7 @@ typedef NS_ENUM(NSUInteger, LibretroAzaharAcceptedInput) {
 /// YES = audio on (the name is historical).
 - (void)mute:(BOOL)mute;
 - (void)fastForward:(float)rate;
-- (void)setRespectSilentMode:(BOOL)respect;
+- (void)setHonorsRingerSwitch:(BOOL)respect;
 /// Forgets the text of the last core message.
 - (void)discardLatestCoreMessage NS_SWIFT_NAME(discardLatestCoreMessage());
 
@@ -191,25 +191,25 @@ typedef NS_ENUM(NSUInteger, LibretroAzaharAcceptedInput) {
 /// Root folder of the libretro workspace.
 @property (nonatomic, copy, nullable) NSString *workspaceRoot;
 
-- (void)resetCheatCode;
+- (void)clearCheats;
 
 // Screen layout (melonDS DS, Azahar) and NDS network
 /// Value of core option gamuroid_screen_layout ("L1;canvas=WxH;upper=x,y,w,h|none;lower=...[;rev=n]"), nil clears.
 /// Set it before start; stop clears it. A repeated identical value does nothing.
 - (void)setScreenLayout:(NSString * _Nullable)layout;
 /// Answer for melonds_firmware_wfc_dns; nil or empty clears it (the option store value is used).
-- (void)setNDSWFCDNS:(NSString * _Nullable)dns;
-/// After a melonDS DS load: post DidConnectToWFCNotification when the core reports online (2) and
-/// DidDisconnectFromWFCNotification on every other change. Stop ends it. No-op for cores without the exports.
-- (void)startWFCStatusMonitor;
+- (void)setDSServerAddress:(NSString * _Nullable)dns;
+/// After a melonDS DS load: post GamuroidWFCOnlineNotification when the core reports online (2) and
+/// GamuroidWFCOfflineNotification on every other change. Stop ends it. No-op for cores without the exports.
+- (void)beginWFCWatch;
 
 // Diagnostics
-- (void)setLibretroLogMonitor:(BOOL)enabled;
+- (void)setCoreLogObserver:(BOOL)enabled;
 
 // Azahar software keyboard
-- (void)registerAzaharKeyboard:(void(^ _Nullable)(LibretroAzaharKeyboardConfig *_Nonnull config))callback;
+- (void)bind3DSTextEntry:(void(^ _Nullable)(LibretroAzaharKeyboardConfig *_Nonnull config))callback;
 - (void)registerAzaharKeyboardErrorCallback:(void(^ _Nullable)(int errorCode, NSString *_Nonnull message))callback;
-- (void)inputAzaharKeyboard:(NSString * _Nullable)text buttonIndex:(int)buttonIndex;
+- (void)submit3DSTextEntry:(NSString * _Nullable)text buttonIndex:(int)buttonIndex;
 - (void)cancelAzaharKeyboard;
 
 @end

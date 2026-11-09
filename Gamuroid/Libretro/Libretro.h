@@ -10,4 +10,4 @@ FOUNDATION_EXPORT double LibretroVersionNumber;
 /// Version string of the Libretro framework.
 FOUNDATION_EXPORT const unsigned char LibretroVersionString[];
 
-// Public headers of the framework are imported as <Libretro/LibretroCore.h>.
+// Public headers of the framework are imported as <Libretro/GamuroidRetroHost.h>.

@@ -1,4 +1,4 @@
-# RetroArch frontend (Libretro target) source as shipped in Gamuroid 3.8.0
+# RetroArch frontend (Libretro target) source as shipped in Gamuroid 3.8.0 (revision r2)
 
 This snapshot is the RetroArch (libretro frontend) source tree that the Gamuroid iOS app compiles as its `Libretro.framework`
 target, plus Gamuroid's glue files. It contains only the C / Objective-C tree, its bundled dependencies and the build flag file.
@@ -10,20 +10,20 @@ byte-identical to upstream.
 | Component | RetroArch as the libretro host of the Gamuroid app (`Libretro.framework`) |
 | Licence | GPL-3.0-or-later (`LICENSE` at the top = `Cores/Libretro/COPYING`; per-file headers). Bundled libraries keep their own licences (libretro-common MIT, etc.) |
 | Upstream | https://github.com/libretro/RetroArch, commit `57acb067b8cc113c86df9b2d45e80d37c9f7f4a2` (v1.21.0 line) |
-| Taken from (informational) | Paths `Cores/Libretro/` and `Gamuroid/Libretro/` of the Gamuroid app's private repository at commit `12f2e89f4d568a02d6b181adcadb1b7552c8a856` (unchanged through `e93cb7584`, 2026-11-09); not fetchable, and not needed: this repository holds every file of those two paths |
+| Matches app version | Gamuroid 3.8.0, revision r2 (tag `gamuroid-3.8.0-r2`). Taken from paths `Cores/Libretro/` and `Gamuroid/Libretro/` of the Gamuroid app's private repository at commit `e0141de570780de93651764fc90aa86fdb0205c6`; not fetchable, and not needed: this repository holds every file of those two paths. Tag `gamuroid-3.8.0` is the earlier revision (r1) of the same version; r2 supersedes it and matches the final app tree |
 | Binary | compiled into the app's `Libretro.framework` (no separate binary SHA) |
 
 ## Layout
 
 - `Cores/Libretro/` : RetroArch tree with Gamuroid changes. Gamuroid glue files: `gamuroid_frontend_values.h`,
-  `input/drivers_joypad/gamuroid_joypad.m` and `gamuroid_joypad_host.h`, `ui/drivers/LibretroCore.m`, `ui/drivers/cocoa/LibretroCore.h`,
+  `input/drivers_joypad/gamuroid_joypad.m` and `gamuroid_joypad_host.h`, `ui/drivers/GamuroidRetroHost.m`, `ui/drivers/cocoa/GamuroidRetroHost.h`,
   `ui/drivers/cocoa/gamuroid_embedded_host.h`; and edits in `runloop.c`, `ui/drivers/ui_cocoatouch.m`, `ui/drivers/cocoa/cocoa_common.m`,
   `input/drivers/cocoa_input.m`, `audio/drivers_microphone/coreaudio_mic.m` and others. RetroArch is built **without** `HAVE_MENU`.
 - `Gamuroid/Libretro/` : `LibretroConfig.xcconfig` (the preprocessor flags of the shipped build), `Libretro.h` (framework umbrella header), `git_version.h`.
 
 ## Interface to the app
 
-`LibretroCore.h` is the public Objective-C interface of the framework (start, stop, pause, resume, state save and load, cheats, options, input,
+`GamuroidRetroHost.h` is the public Objective-C interface of the framework (start, stop, pause, resume, state save and load, cheats, options, input,
 video and audio hooks). `gamuroid_embedded_host.h` and `gamuroid_joypad_host.h` declare the callbacks the host (the Gamuroid app) provides.
 The app side is not published; any other host can implement these headers. `cocoa_common.m` imports `RetroArch-Swift.h` only under
 `HAVE_IOS_SWIFT`, which the Gamuroid build does not define.
@@ -37,8 +37,8 @@ them in an Xcode project placed in `Gamuroid/` (the xcconfig resolves `SRCBASE =
 - **Base configuration:** `Gamuroid/Libretro/LibretroConfig.xcconfig` (every preprocessor flag, the header search paths, C++ standard
   `c++11`, ARC on). Release adds `-DNDEBUG -DNS_BLOCK_ASSERTIONS=1` through the same file.
 - **Sources (6 files, all under `Cores/Libretro/`):** `griffin/griffin.c` (RetroArch's unity-build entry), `griffin/griffin_objc.m`,
-  `griffin/griffin_cpp.cpp`, `griffin/griffin_glslang.cpp`, `ui/drivers/LibretroCore.m`, `pkg/apple/JITSupport.m`.
-- **Public header:** `Cores/Libretro/ui/drivers/cocoa/LibretroCore.h`; umbrella header `Gamuroid/Libretro/Libretro.h`;
+  `griffin/griffin_cpp.cpp`, `griffin/griffin_glslang.cpp`, `ui/drivers/GamuroidRetroHost.m`, `pkg/apple/JITSupport.m`.
+- **Public header:** `Cores/Libretro/ui/drivers/cocoa/GamuroidRetroHost.h`; umbrella header `Gamuroid/Libretro/Libretro.h`;
   `Gamuroid/Libretro/git_version.h` supplies `GIT_VERSION` (`HAVE_GIT_VERSION`).
 - **Target settings (Release):** product `Libretro.framework` (`MACH_O_TYPE = mh_dylib`, `DEFINES_MODULE = YES`,
   `DYLIB_INSTALL_NAME_BASE = @rpath`), `IPHONEOS_DEPLOYMENT_TARGET = 15.0`, arm64, `GCC_OPTIMIZATION_LEVEL = s`,

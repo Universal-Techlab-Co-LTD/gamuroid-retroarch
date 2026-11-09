@@ -1,11 +1,11 @@
 // gamuroid_embedded_host.h — Gamuroid.
 //
 // Embedded-host API of RetroArch_iOS. With GAMUROID_EMBEDDED_HOST the RetroArch_iOS object is not the
-// application delegate: the LibretroCore bridge creates it and drives one libretro session at a time through
-// the methods below. Only ui_cocoatouch.m (implementation) and LibretroCore.m (caller) import this header.
+// application delegate: the GamuroidRetroHost bridge creates it and drives one libretro session at a time through
+// the methods below. Only ui_cocoatouch.m (implementation) and GamuroidRetroHost.m (caller) import this header.
 //
 // Contract of every method: call on the main thread; completions are delivered on the main queue.
-// Parameter types and nullability follow the bridge method each host method serves (cocoa/LibretroCore.h).
+// Parameter types and nullability follow the bridge method each host method serves (cocoa/GamuroidRetroHost.h).
 // Host names carry the "host" prefix so that they never collide with the bridge selectors.
 
 #ifndef GAMUROID_EMBEDDED_HOST_H

@@ -1,4 +1,4 @@
-// LibretroCore.m — Gamuroid.
+// GamuroidRetroHost.m — Gamuroid.
 //
 // The bridge owns no emulation logic. It forwards app calls to the RetroArch host object (RetroArch_iOS in
 // ui_cocoatouch.m), registers the RetroArch/core callbacks the app needs, turns them into notifications on
@@ -8,7 +8,7 @@
 // Threading: every public method runs on the main thread. RetroArch callbacks may arrive on any thread; they
 // copy what they need before returning and hand the result to the main queue asynchronously.
 
-#import "cocoa/LibretroCore.h"
+#import "cocoa/GamuroidRetroHost.h"
 
 #import <AVFoundation/AVFoundation.h>
 #import <CoreFoundation/CoreFoundation.h>
@@ -68,12 +68,12 @@
 
 #pragma mark - Notification names (each string equals its symbol)
 
-NSString * const DidConnectToWFCNotification = @"DidConnectToWFCNotification";
-NSString * const DidDisconnectFromWFCNotification = @"DidDisconnectFromWFCNotification";
-NSString * const LibretroDidShutdownNotification = @"LibretroDidShutdownNotification";
+NSString * const GamuroidWFCOnlineNotification = @"GamuroidWFCOnlineNotification";
+NSString * const GamuroidWFCOfflineNotification = @"GamuroidWFCOfflineNotification";
+NSString * const GamuroidRetroHostDidStopNotification = @"GamuroidRetroHostDidStopNotification";
 NSString * const LibretroSaveStateLoadFailedNotification = @"LibretroSaveStateLoadFailedNotification";
 NSString * const LibretroSaveStateRevisionMismatchNotification = @"LibretroSaveStateRevisionMismatchNotification";
-NSString * const MAMEGameFileMissingNotification = @"MAMEGameFileMissingNotification";
+NSString * const GamuroidCoreFilesMissingNotification = @"GamuroidCoreFilesMissingNotification";
 
 static NSString * const kMessageUserInfoKey = @"message";
 
@@ -100,7 +100,7 @@ static NSString *StringFromCoreUTF8(const char *text)
 
 static void HandleCoreShutdownRequest(void)
 {
-    PostOnMainQueue(LibretroDidShutdownNotification, nil);
+    PostOnMainQueue(GamuroidRetroHostDidStopNotification, nil);
 }
 
 #pragma mark - melonDS DS online state (core exports gamuroid_net_state_get / gamuroid_net_state_listen)
@@ -112,12 +112,12 @@ typedef void (*NetStateListenerFn)(int code);
 typedef int (*NetStateGetFn)(void);
 typedef void (*NetStateListenFn)(NetStateListenerFn listener);
 
-/// YES between startWFCStatusMonitor and stop. Main thread only.
+/// YES between beginWFCWatch and stop. Main thread only.
 static BOOL sNetStateMonitorActive = NO;
 
 static void PostNetState(int code)
 {
-    PostOnMainQueue(code == kNetStateAssociated ? DidConnectToWFCNotification : DidDisconnectFromWFCNotification, nil);
+    PostOnMainQueue(code == kNetStateAssociated ? GamuroidWFCOnlineNotification : GamuroidWFCOfflineNotification, nil);
 }
 
 /// Called by the core on the thread running retro_run, only when the code changed. Does not call the core.
@@ -147,7 +147,7 @@ static void HandleCoreLogLine(enum retro_log_level level, const char *fmt, va_li
     BOOL attachLine = NO;
     if (level == RETRO_LOG_ERROR) {
         if (strstr(line, "Required files are missing,") != NULL) {
-            name = MAMEGameFileMissingNotification;
+            name = GamuroidCoreFilesMissingNotification;
         } else if (strstr(line, "Failed to load state") != NULL) {
             name = LibretroSaveStateLoadFailedNotification;
             attachLine = YES;
@@ -273,17 +273,17 @@ static LibretroAzaharKeyboardConfig *KeyboardConfigFromRequest(const GamuroidKey
     uint32_t flags = request->flags;
     LibretroAzaharKeyboardConfig *config = [LibretroAzaharKeyboardConfig new];
     config.buttonConfig     = ButtonConfigForCount(request->button_count);
-    config.acceptedInput    = (LibretroAzaharAcceptedInput)request->accept;
+    config.allowedEntry    = (LibretroAzaharAcceptedInput)request->accept;
     config.maxTextLength    = (NSInteger)request->max_length;
-    config.maxDigits        = (NSInteger)request->max_digits;
+    config.digitLimit        = (NSInteger)request->max_digits;
     config.okButtonIndex    = (NSInteger)request->confirm_button;
-    config.multilineMode    = (flags & kKeyboardFlagMultiline) != 0;
-    config.preventDigit     = (flags & kKeyboardFlagNoDigits) != 0;
-    config.preventAt        = (flags & kKeyboardFlagNoAt) != 0;
-    config.preventPercent   = (flags & kKeyboardFlagNoPercent) != 0;
-    config.preventBackslash = (flags & kKeyboardFlagNoBackslash) != 0;
-    config.preventProfanity = (flags & kKeyboardFlagProfanity) != 0;
-    config.enableCallback   = (flags & kKeyboardFlagGameCallback) != 0;
+    config.allowsLineBreaks    = (flags & kKeyboardFlagMultiline) != 0;
+    config.blocksDigits     = (flags & kKeyboardFlagNoDigits) != 0;
+    config.blocksAtSign        = (flags & kKeyboardFlagNoAt) != 0;
+    config.blocksPercent   = (flags & kKeyboardFlagNoPercent) != 0;
+    config.blocksBackslash = (flags & kKeyboardFlagNoBackslash) != 0;
+    config.blocksProfanity = (flags & kKeyboardFlagProfanity) != 0;
+    config.callbackActive   = (flags & kKeyboardFlagGameCallback) != 0;
     config.hintText         = StringFromCoreUTF8(request->hint);
 
     uint32_t count = MIN(request->button_count, (uint32_t)kKeyboardMaxButtons);
@@ -397,7 +397,7 @@ static inline const char *LibretroBoolString(BOOL value)
     return value ? "YES" : "NO";
 }
 
-@interface LibretroCore()
+@interface GamuroidRetroHost()
 
 @property (assign) BOOL isRunning;
 @property (nonatomic, copy, nullable) NSString *runtimeWorkspace;
@@ -408,7 +408,7 @@ static inline const char *LibretroBoolString(BOOL value)
 
 @end
 
-@implementation LibretroCore
+@implementation GamuroidRetroHost
 {
     /// gamuroid_screen_layout value last handed to RetroArch since the last forget.
     BOOL _screenLayoutKnown;
@@ -419,7 +419,7 @@ static inline const char *LibretroBoolString(BOOL value)
 
 + (instancetype)sharedInstance
 {
-    static LibretroCore *shared = nil;
+    static GamuroidRetroHost *shared = nil;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         shared = [[super allocWithZone:NULL] initSingletonInstance];
@@ -494,7 +494,7 @@ static inline const char *LibretroBoolString(BOOL value)
     return [retroArch hostCoreAcceptsContent];
 }
 
-- (BOOL)isCoreRunning {
+- (BOOL)coreLoopRunning {
     RetroArch_iOS *retroArch = [self host];
     if (!retroArch) {
         return NO;
@@ -542,18 +542,18 @@ static inline const char *LibretroBoolString(BOOL value)
 
 #pragma mark Lifecycle
 
-- (UIViewController *)beginSessionWithSaveDirectory:(NSString *_Nullable)customSaveDir {
-    [[self host] hostBeginSessionWithSaveDir:customSaveDir];
+- (UIViewController *)beginSessionWithSaveDirectory:(NSString *_Nullable)saveFolderOverride {
+    [[self host] hostBeginSessionWithSaveDir:saveFolderOverride];
     // Re-wire any Azahar keyboard callbacks that were registered before the
     // core dylib was dlopen'd. No-op if handle is still null or no callbacks pending.
     BindKeyboardTrampolines(LoadedCoreHandle(), YES);
     self.isRunning = self.isLibretroInitialized;
     if ([self shouldTraceFlycastRuntime]) {
-        NSLog(@"[DC_TRACE] startWithCustomSaveDir customSaveDir=%@ lastCorePath=%@ libretroInitialized=%s coreRunning=%s",
-              customSaveDir ?: @"<nil>",
+        NSLog(@"[DC_TRACE] startWithCustomSaveDir saveFolderOverride=%@ lastCorePath=%@ libretroInitialized=%s coreRunning=%s",
+              saveFolderOverride ?: @"<nil>",
               self.lastLibretroCorePath ?: @"<nil>",
               LibretroBoolString(self.isRunning),
-              LibretroBoolString([self isCoreRunning]));
+              LibretroBoolString([self coreLoopRunning]));
     }
     gamuroid_register_shutdown_callback(HandleCoreShutdownRequest);
     runloop_set_gamuroid_core_log_handler(HandleCoreLogLine);
@@ -565,7 +565,7 @@ static inline const char *LibretroBoolString(BOOL value)
         NSLog(@"[DC_TRACE] pause corePath=%@ isRunning=%s coreRunning=%s frameCount=%llu",
               self.lastLibretroCorePath ?: @"<nil>",
               LibretroBoolString(self.isRunning),
-              LibretroBoolString([self isCoreRunning]),
+              LibretroBoolString([self coreLoopRunning]),
               [self videoFrameCount]);
     }
     [[self host] hostPauseSession];
@@ -576,7 +576,7 @@ static inline const char *LibretroBoolString(BOOL value)
         NSLog(@"[DC_TRACE] resume corePath=%@ isRunning=%s coreRunning=%s frameCount=%llu",
               self.lastLibretroCorePath ?: @"<nil>",
               LibretroBoolString(self.isRunning),
-              LibretroBoolString([self isCoreRunning]),
+              LibretroBoolString([self coreLoopRunning]),
               [self videoFrameCount]);
     }
     [[self host] hostResumeSession];
@@ -593,7 +593,7 @@ static inline const char *LibretroBoolString(BOOL value)
         NSLog(@"[DC_TRACE] stop corePath=%@ isRunning=%s coreRunning=%s frameCount=%llu",
               self.lastLibretroCorePath ?: @"<nil>",
               LibretroBoolString(self.isRunning),
-              LibretroBoolString([self isCoreRunning]),
+              LibretroBoolString([self coreLoopRunning]),
               [self videoFrameCount]);
     }
     self.isRunning = NO;
@@ -606,7 +606,7 @@ static inline const char *LibretroBoolString(BOOL value)
     // Cancel any in-flight keyboard request in the core before tearing the
     // dylib down. Must happen BEFORE dlclose so retro_keyboard_cancel is still
     // resolvable. Keep the saved Swift callbacks registered: Azahar can stop
-    // and immediately restart inside the same PlayViewController (permission
+    // and immediately restart inside the same GamuroidPlayScreen (permission
     // return, Vulkan cleanup, active-core restart). Clearing them here makes
     // the first SWKBD request after restart fall through to the core's empty
     // input fallback.
@@ -619,7 +619,7 @@ static inline const char *LibretroBoolString(BOOL value)
 
 #pragma mark Content
 
-- (BOOL)openContent:(NSString *)gamePath withCore:(NSString *)corePath completion:(void(^ _Nullable)(NSDictionary *_Nullable))completion {
+- (BOOL)openContent:(NSString *)contentLocation withCore:(NSString *)corePath completion:(void(^ _Nullable)(NSDictionary *_Nullable))completion {
     // New content/core load — clear layout caches so first push for this content
     // applies fresh (some load paths may bypass -stop, e.g., direct core swap).
     [self forgetLayoutMemory];
@@ -627,16 +627,16 @@ static inline const char *LibretroBoolString(BOOL value)
 
     self.lastLibretroCorePath = corePath;
     if ([corePath.lowercaseString containsString:@"melonds"]) {
-        NSLog(@"[NDSLayoutTrace] loadGame corePath=%@ gamePath=%@",
+        NSLog(@"[NDSLayoutTrace] bootContentFile corePath=%@ contentLocation=%@",
               corePath ?: @"<nil>",
-              gamePath ?: @"<nil>");
+              contentLocation ?: @"<nil>");
     } else if ([corePath.lowercaseString containsString:@"flycast"]) {
-        NSLog(@"[DC_TRACE] loadGame corePath=%@ gamePath=%@ isRunning=%s",
+        NSLog(@"[DC_TRACE] bootContentFile corePath=%@ contentLocation=%@ isRunning=%s",
               corePath ?: @"<nil>",
-              gamePath ?: @"<nil>",
+              contentLocation ?: @"<nil>",
               LibretroBoolString(self.isRunning));
     }
-    return [[self host] hostOpenContent:gamePath withCore:corePath completion:completion];
+    return [[self host] hostOpenContent:contentLocation withCore:corePath completion:completion];
 }
 
 - (BOOL)openSubsystem:(NSString *)subsystemIdent
@@ -672,7 +672,7 @@ static inline const char *LibretroBoolString(BOOL value)
         NSLog(@"[DC_TRACE] saveState request corePath=%@ isRunning=%s coreRunning=%s frameCount=%llu",
               self.lastLibretroCorePath ?: @"<nil>",
               LibretroBoolString(self.isRunning),
-              LibretroBoolString([self isCoreRunning]),
+              LibretroBoolString([self coreLoopRunning]),
               [self videoFrameCount]);
     }
     BOOL result = [[self host] hostSaveStateWithCompletion:completion];
@@ -689,7 +689,7 @@ static inline const char *LibretroBoolString(BOOL value)
         NSLog(@"[DC_TRACE] saveStateAsyncControlled request corePath=%@ isRunning=%s coreRunning=%s frameCount=%llu",
               self.lastLibretroCorePath ?: @"<nil>",
               LibretroBoolString(self.isRunning),
-              LibretroBoolString([self isCoreRunning]),
+              LibretroBoolString([self coreLoopRunning]),
               [self videoFrameCount]);
     }
     BOOL result = [[self host] hostSaveStateControlledWithCompletion:completion];
@@ -707,7 +707,7 @@ static inline const char *LibretroBoolString(BOOL value)
               self.lastLibretroCorePath ?: @"<nil>",
               path ?: @"<nil>",
               LibretroBoolString(self.isRunning),
-              LibretroBoolString([self isCoreRunning]),
+              LibretroBoolString([self coreLoopRunning]),
               [self videoFrameCount]);
     }
     BOOL result = [[self host] hostRestoreStateAtPath:path];
@@ -743,7 +743,7 @@ static inline const char *LibretroBoolString(BOOL value)
     [[self host] hostSetFastForwardRate:rate];
 }
 
-- (void)setRespectSilentMode:(BOOL)respect
+- (void)setHonorsRingerSwitch:(BOOL)respect
 {
     [[self host] hostSetSilentSwitchRespected:respect];
 }
@@ -802,12 +802,12 @@ static inline const char *LibretroBoolString(BOOL value)
 
 #pragma mark Input
 
-- (void)setEnableRumble:(BOOL)enable
+- (void)setRumbleOn:(BOOL)enable
 {
     [[self host] hostSetRumbleEnabled:enable];
 }
 
-- (BOOL)getSensorEnable:(int)playerIndex
+- (BOOL)motionSensorsOn:(int)playerIndex
 {
     return [[self host] hostMotionSensorRequestedForPort:(unsigned)playerIndex];
 }
@@ -858,29 +858,29 @@ static inline const char *LibretroBoolString(BOOL value)
     [[self host] hostSetFrontendSetting:key to:value];
 }
 
-- (void)updateLibretroConfigs:(NSDictionary<NSString *, NSString *> *)configs
+- (void)applyRetroOptions:(NSDictionary<NSString *, NSString *> *)configs
 {
     [[self host] hostSetFrontendSettings:configs];
 }
 
-- (NSString *)coreConfigValue:(NSString *)coreName key:(NSString *)key
+- (NSString *)coreOptionValue:(NSString *)coreName key:(NSString *)key
 {
     return [[self host] hostOptionValue:key forCore:coreName];
 }
 
-- (NSString *)libretroConfigValue:(NSString *)key
+- (NSString *)retroOptionValue:(NSString *)key
 {
     return [[self host] hostFrontendSettingValue:key];
 }
 
-- (void)setReloadDelay:(double)delay
+- (void)setRestoreDelay:(double)delay
 {
     [[self host] hostSetReloadDelay:delay];
 }
 
-- (void)setCustomSaveExtension:(NSString * _Nullable)customSaveExtension
+- (void)setSaveSuffixOverride:(NSString * _Nullable)saveSuffixOverride
 {
-    [[self host] hostSetSaveExtension:customSaveExtension];
+    [[self host] hostSetSaveExtension:saveSuffixOverride];
 }
 
 - (void)markCoreOptionsDirty
@@ -915,7 +915,7 @@ static inline const char *LibretroBoolString(BOOL value)
     [[self host] hostAddCheat:code slot:index enabled:enable];
 }
 
-- (void)resetCheatCode
+- (void)clearCheats
 {
     [[self host] hostClearCheats];
 }
@@ -951,7 +951,7 @@ static inline const char *LibretroBoolString(BOOL value)
 
 #pragma mark NDS network
 
-- (void)setNDSWFCDNS:(NSString *)dns
+- (void)setDSServerAddress:(NSString *)dns
 {
     /* nil (or an empty string) clears the answer: melonds_firmware_wfc_dns then comes from the option store. */
     const char *utf8 = (dns.length > 0) ? dns.UTF8String : NULL;
@@ -959,7 +959,7 @@ static inline const char *LibretroBoolString(BOOL value)
         [self markCoreOptionsDirty];
 }
 
-- (void)startWFCStatusMonitor
+- (void)beginWFCWatch
 {
     sNetStateMonitorActive = YES;
     ListenForNetState(LoadedCoreHandle(), YES);
@@ -967,14 +967,14 @@ static inline const char *LibretroBoolString(BOOL value)
 
 #pragma mark Diagnostics
 
-- (void)setLibretroLogMonitor:(BOOL)enabled
+- (void)setCoreLogObserver:(BOOL)enabled
 {
     atomic_store_explicit(&sLogMonitorEnabled, enabled ? true : false, memory_order_relaxed);
 }
 
 #pragma mark Azahar software keyboard (app side)
 
-- (void)registerAzaharKeyboard:(void (^)(LibretroAzaharKeyboardConfig *))handler
+- (void)bind3DSTextEntry:(void (^)(LibretroAzaharKeyboardConfig *))handler
 {
     sKeyboardRequestHandler = [handler copy];
     /* The trampolines are bound at every core load; binding again is harmless and covers a core that was
@@ -987,7 +987,7 @@ static inline const char *LibretroBoolString(BOOL value)
     sKeyboardErrorHandler = [handler copy];
 }
 
-- (void)inputAzaharKeyboard:(NSString *)text buttonIndex:(int)buttonIndex
+- (void)submit3DSTextEntry:(NSString *)text buttonIndex:(int)buttonIndex
 {
     void *handle = LoadedCoreHandle();
     if (!CoreSpeaksKeyboardABI(handle))
