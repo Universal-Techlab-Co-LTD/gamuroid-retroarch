@@ -1,0 +1,6 @@
+# id	framework	repo_url	commit	submodules	make_dir	make_file	make_args("-" = none)	built_dylib	version_string	extra_cc_flags("-" = none)
+gearsystem	gearsystem.libretro	https://github.com/drhelius/Gearsystem	7acbe0f36192c5435e3448c1e0316379b17f59d8	0	platforms/libretro	Makefile	-	gearsystem_libretro_ios.dylib	7acbe0f	-
+clownmdemu	clownmdemu.libretro	https://github.com/Clownacy/clownmdemu-libretro	0675a303f01f16f4f113752d02324b87a568d201	1	.	Makefile	-	clownmdemu_libretro_ios.dylib	0675a30	-
+bsnes	bsnes.libretro	https://github.com/libretro/bsnes	63ee22f7af8f5d1ada295c2c98fd7bf261fa62a7	0	.	Makefile	-	bsnes_libretro_ios.dylib	115	-Wno-invalid-specialization
+bsnes-jg	bsnes-jg.libretro	https://github.com/libretro/bsnes-jg	3f37a92f5ea3dc20b5f14176e9e4da2276fad101	0	libretro	Makefile	-	bsnes-jg_libretro_ios.dylib	2.0	-
+pokemini	pokemini.libretro	https://github.com/libretro/PokeMini	19095803f1434eb980db6e4004187a4b786e20b6	0	.	Makefile.libretro	-	pokemini_libretro_ios.dylib	v0.60	-

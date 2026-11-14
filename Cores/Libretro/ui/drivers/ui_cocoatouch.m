@@ -346,6 +346,8 @@ static void handle_touch_event(NSArray* touches)
    if (!apple)
       return;
 
+   /* Gamuroid: this path rewrites the whole touch state; a held host press must not replace it. */
+   gamuroid_pointer_gate_cancel(&apple->pointer_gate);
    apple->touch_count = 0;
 
    for (i = 0; i < touches.count && (apple->touch_count < MAX_TOUCHES); i++)
@@ -1352,19 +1354,20 @@ static void gamuroid_host_after(double delay, void (^block)(void))
    });
 }
 
-/* Category used while a game plays: Ambient respects the silent switch. */
+/* Category used while a game plays: Ambient respects the silent switch.
+ * AllowAirPlay / AllowBluetoothA2DP are valid only with PlayAndRecord (AVAudioSessionTypes.h);
+ * output-only categories already offer AirPlay and A2DP routes, and with Playback they made
+ * setCategory fail (OSStatus -50), so the session stayed Ambient. Ambient always mixes and
+ * takes no option; Playback mixes only with MixWithOthers. */
 static void gamuroid_host_set_playback_category(BOOL respectSilentSwitch)
 {
    NSError *error = nil;
-   AVAudioSessionCategoryOptions options = AVAudioSessionCategoryOptionMixWithOthers
-      | AVAudioSessionCategoryOptionAllowBluetoothA2DP
-      | AVAudioSessionCategoryOptionAllowAirPlay;
-   [[AVAudioSession sharedInstance]
-      setCategory:respectSilentSwitch ? AVAudioSessionCategoryAmbient : AVAudioSessionCategoryPlayback
-      withOptions:options
-            error:&error];
-   if (error)
-      NSLog(@"[LibretroHost] audio session category failed: %@", error.localizedDescription);
+   AVAudioSessionCategory category = respectSilentSwitch
+      ? AVAudioSessionCategoryAmbient : AVAudioSessionCategoryPlayback;
+   AVAudioSessionCategoryOptions options = respectSilentSwitch
+      ? 0 : AVAudioSessionCategoryOptionMixWithOthers;
+   if (![[AVAudioSession sharedInstance] setCategory:category withOptions:options error:&error])
+      NSLog(@"[LibretroHost] audio session category %@ failed: %@", category, error.localizedDescription);
 }
 
 /* ---- key = "value" files (core options, retroarch.cfg) ---- */
@@ -1601,6 +1604,7 @@ static UIImage *gamuroid_image_from_viewport_pixels(const uint8_t *bgr, size_t w
                                             selector:@selector(handleAudioSessionInterruption:)
                                                 name:AVAudioSessionInterruptionNotification
                                               object:[AVAudioSession sharedInstance]];
+   [self gamuroid_observeAppSaveFlush:YES];
 
    /* Audio starts about one second in, only if this session is still running. */
    gamuroid_host_after(1.0, ^{
@@ -1637,6 +1641,7 @@ static UIImage *gamuroid_image_from_viewport_pixels(const uint8_t *bgr, size_t w
       [[NSNotificationCenter defaultCenter] removeObserver:self
                                                       name:AVAudioSessionInterruptionNotification
                                                     object:[AVAudioSession sharedInstance]];
+      [self gamuroid_observeAppSaveFlush:NO];
       mark_libretro_stopped();
       return;
    }
@@ -1650,6 +1655,60 @@ static UIImage *gamuroid_image_from_viewport_pixels(const uint8_t *bgr, size_t w
       return;
    command_event(CMD_EVENT_PAUSE, NULL);
    rarch_stop_draw_observer();
+}
+
+/* RetroArch_iOS is not the application delegate here, so its own
+ * applicationDidEnterBackground: (CMD_EVENT_SAVE_FILES) never runs: without this the
+ * battery save reached disk only through the 10 s autosave and at stop. Runs on main,
+ * between frames; the core is neither run nor unpaused. */
+- (void)gamuroid_flushSaveFilesForAppNotification:(NSNotification *)notification
+{
+   runloop_state_t *runloop_st = runloop_state_get_ptr();
+   BOOL autosaveRunning;
+
+   if (!gamuroid_host_is_live())
+   {
+      NSLog(@"[LibretroHost] save flush skipped (%@): no running session", notification.name);
+      return;
+   }
+   if (!(runloop_st->flags & RUNLOOP_FLAG_USE_SRAM))
+   {
+      NSLog(@"[LibretroHost] save flush skipped (%@): content has no save memory", notification.name);
+      return;
+   }
+
+   /* The autosave thread writes the same files: join it first so two writers never
+    * truncate one file (teardown order, retroarch.c), then start it again. */
+   autosaveRunning = (runloop_st->flags & RUNLOOP_FLAG_AUTOSAVE) != 0;
+   if (autosaveRunning)
+      autosave_deinit();
+   if (command_event(CMD_EVENT_SAVE_FILES, NULL))
+      NSLog(@"[LibretroHost] save files flushed (%@)", notification.name);
+   else
+      NSLog(@"[LibretroHost] save flush wrote nothing (%@)", notification.name);
+   if (autosaveRunning)
+      command_event(CMD_EVENT_AUTOSAVE_INIT, NULL);
+}
+
+- (void)gamuroid_observeAppSaveFlush:(BOOL)observe
+{
+   NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+   if (observe)
+   {
+      [center addObserver:self
+                 selector:@selector(gamuroid_flushSaveFilesForAppNotification:)
+                     name:UIApplicationDidEnterBackgroundNotification
+                   object:nil];
+      [center addObserver:self
+                 selector:@selector(gamuroid_flushSaveFilesForAppNotification:)
+                     name:UIApplicationWillTerminateNotification
+                   object:nil];
+   }
+   else
+   {
+      [center removeObserver:self name:UIApplicationDidEnterBackgroundNotification object:nil];
+      [center removeObserver:self name:UIApplicationWillTerminateNotification object:nil];
+   }
 }
 
 - (void)hostResumeSession
@@ -1692,6 +1751,8 @@ static UIImage *gamuroid_image_from_viewport_pixels(const uint8_t *bgr, size_t w
 
    LibretroInitial = false;
    gamuroid_set_host_stopping(true);
+   /* Teardown below saves the files itself. */
+   [self gamuroid_observeAppSaveFlush:NO];
 
    /* No sound may linger while a slow core tears down. */
    audio_driver_stop();
@@ -2197,11 +2258,22 @@ static cocoa_input_data_t *gamuroid_host_apple_input(void)
 #if !TARGET_OS_TV
    cocoa_input_data_t *apple = gamuroid_host_apple_input();
    float scale               = cocoa_screen_get_native_scale();
+   int16_t screen_x;
+   int16_t screen_y;
    if (!apple)
       return;
+   screen_x = (int16_t)(x * scale);
+   screen_y = (int16_t)(y * scale);
+   /* Gamuroid: a press right after a lift that no input poll has seen is held until the next
+    * poll, so the core sees the pointer lifted once instead of a drag to the new point. */
+   if (!gamuroid_pointer_gate_press(&apple->pointer_gate, screen_x, screen_y))
+   {
+      apple->touch_count = 0;
+      return;
+   }
    apple->touch_count         = 1;
-   apple->touches[0].screen_y = (int16_t)(y * scale);
-   apple->touches[0].screen_x = (int16_t)(x * scale);
+   apple->touches[0].screen_y = screen_y;
+   apple->touches[0].screen_x = screen_x;
 #endif
 }
 
@@ -2209,8 +2281,10 @@ static cocoa_input_data_t *gamuroid_host_apple_input(void)
 {
 #if !TARGET_OS_TV
    cocoa_input_data_t *apple = gamuroid_host_apple_input();
-   if (apple)
-      apple->touch_count = 0;
+   if (!apple)
+      return;
+   gamuroid_pointer_gate_lift(&apple->pointer_gate);
+   apple->touch_count = 0;
 #endif
 }
 

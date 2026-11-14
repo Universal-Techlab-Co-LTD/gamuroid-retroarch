@@ -1,4 +1,4 @@
-# RetroArch frontend (Libretro target) source as shipped in Gamuroid 3.8.0 (revision r2)
+# RetroArch frontend (Libretro target) source as shipped in Gamuroid 3.8.0 (revision r3)
 
 This snapshot is the RetroArch (libretro frontend) source tree that the Gamuroid iOS app compiles as its `Libretro.framework`
 target, plus Gamuroid's glue files. It contains only the C / Objective-C tree, its bundled dependencies and the build flag file.
@@ -10,7 +10,7 @@ byte-identical to upstream.
 | Component | RetroArch as the libretro host of the Gamuroid app (`Libretro.framework`) |
 | Licence | GPL-3.0-or-later (`LICENSE` at the top = `Cores/Libretro/COPYING`; per-file headers). Bundled libraries keep their own licences (libretro-common MIT, etc.) |
 | Upstream | https://github.com/libretro/RetroArch, commit `57acb067b8cc113c86df9b2d45e80d37c9f7f4a2` (v1.21.0 line) |
-| Matches app version | Gamuroid 3.8.0, revision r2 (tag `gamuroid-3.8.0-r2`). Taken from paths `Cores/Libretro/` and `Gamuroid/Libretro/` of the Gamuroid app's private repository at commit `e0141de570780de93651764fc90aa86fdb0205c6`; not fetchable, and not needed: this repository holds every file of those two paths. Tag `gamuroid-3.8.0` is the earlier revision (r1) of the same version; r2 supersedes it and matches the final app tree |
+| Matches app version | Gamuroid 3.8.0 build 24, revision r3 (tag `gamuroid-3.8.0-r3`). Taken from paths `Cores/Libretro/` and `Gamuroid/Libretro/` of the Gamuroid app's private repository at commit `536a4f958` (the two paths last changed in `e9f8462d9`); that repository is not fetchable and not needed: this repository holds every file of those two paths. Earlier revisions `gamuroid-3.8.0` (r1) and `gamuroid-3.8.0-r2` are superseded by r3 and match earlier builds only |
 | Binary | compiled into the app's `Libretro.framework` (no separate binary SHA) |
 
 ## Layout
@@ -19,6 +19,7 @@ byte-identical to upstream.
   `input/drivers_joypad/gamuroid_joypad.m` and `gamuroid_joypad_host.h`, `ui/drivers/GamuroidRetroHost.m`, `ui/drivers/cocoa/GamuroidRetroHost.h`,
   `ui/drivers/cocoa/gamuroid_embedded_host.h`; and edits in `runloop.c`, `ui/drivers/ui_cocoatouch.m`, `ui/drivers/cocoa/cocoa_common.m`,
   `input/drivers/cocoa_input.m`, `audio/drivers_microphone/coreaudio_mic.m` and others. RetroArch is built **without** `HAVE_MENU`.
+- `libretro-cores/` : build script, pin table and source references for the five unmodified GPL-3.0 / AGPL-3.0 libretro cores shipped as separate frameworks (see `cores/README.md`).
 - `Gamuroid/Libretro/` : `LibretroConfig.xcconfig` (the preprocessor flags of the shipped build), `Libretro.h` (framework umbrella header), `git_version.h`.
 
 ## Interface to the app

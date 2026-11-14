@@ -119,6 +119,8 @@ typedef struct
    ssize_t bytes_read;
    int state_slot;
    uint8_t flags;
+   /* Gamuroid: set when the load was requested through GamuroidRetroHost -loadState: (plan C-1). */
+   bool gamuroid_host_request;
    char path[PATH_MAX_LENGTH];
 } save_task_state_t;
 
@@ -1041,6 +1043,58 @@ bool content_deserialize_state(const void *s, size_t len)
    return true;
 }
 
+/* Gamuroid (plan C-1, 3DS state-load fix): final result of a load requested by GamuroidRetroHost.
+ *
+ * RetroArch reports a finished load only as a log line, so the app could not tell a rejected state from
+ * an applied one. The host arms one request right before it calls content_load_state() (main thread,
+ * synchronously), content_load_state() marks the task it creates, and content_load_state_cb() hands the
+ * final result to the registered handler: ok = core_unserialize() returned true, !ok = unreadable file,
+ * bad wrapper or a core that refused the data. Autoload, undo and backup loads are never marked, so
+ * they never report. The handler runs on the thread that finishes the task and must not call back
+ * into RetroArch. Prototypes are repeated in GamuroidRetroHost.m (no RetroArch header is touched). */
+typedef void (*gamuroid_state_load_result_fn)(const char *path, bool ok);
+
+static gamuroid_state_load_result_fn s_gamuroid_state_load_result_cb;
+static bool s_gamuroid_state_load_host_armed;
+static bool s_gamuroid_state_load_host_consumed;
+
+void gamuroid_state_load_set_result_handler(gamuroid_state_load_result_fn handler);
+void gamuroid_state_load_arm_host_request(void);
+bool gamuroid_state_load_disarm_host_request(void);
+
+void gamuroid_state_load_set_result_handler(gamuroid_state_load_result_fn handler)
+{
+   __atomic_store_n(&s_gamuroid_state_load_result_cb, handler, __ATOMIC_RELEASE);
+}
+
+/* Main thread, immediately before content_load_state(). */
+void gamuroid_state_load_arm_host_request(void)
+{
+   __atomic_store_n(&s_gamuroid_state_load_host_consumed, false, __ATOMIC_RELAXED);
+   __atomic_store_n(&s_gamuroid_state_load_host_armed, true, __ATOMIC_RELEASE);
+}
+
+/* Main thread, immediately after content_load_state(). Returns true when that call queued a marked
+ * task, i.e. when exactly one result will be reported. */
+bool gamuroid_state_load_disarm_host_request(void)
+{
+   __atomic_store_n(&s_gamuroid_state_load_host_armed, false, __ATOMIC_RELEASE);
+   return __atomic_exchange_n(&s_gamuroid_state_load_host_consumed, false, __ATOMIC_ACQ_REL);
+}
+
+static void gamuroid_report_state_load(const load_task_data_t *data, bool ok)
+{
+   gamuroid_state_load_result_fn handler;
+
+   if (!data || !data->gamuroid_host_request)
+      return;
+   handler = __atomic_load_n(&s_gamuroid_state_load_result_cb, __ATOMIC_ACQUIRE);
+   if (handler)
+      handler(data->path, ok);
+   else
+      RARCH_WARN("[State]: no result handler for a host-requested load of \"%s\".\n", data->path);
+}
+
 /**
  * content_load_state_cb:
  * @path      : path that state will be loaded from.
@@ -1188,6 +1242,8 @@ static void content_load_state_cb(retro_task_t *task,
    if (!ret)
       goto error;
 
+   gamuroid_report_state_load(load_data, true);
+
    free(buf);
    free(load_data);
 
@@ -1197,6 +1253,7 @@ error:
    RARCH_ERR("[State]: %s \"%s\".\n",
          msg_hash_to_str(MSG_FAILED_TO_LOAD_STATE),
          load_data->path);
+   gamuroid_report_state_load(load_data, false);
    if (buf)
       free(buf);
    free(load_data);
@@ -1635,6 +1692,7 @@ bool content_load_state(const char *path,
    retro_time_t start_usec          = cpu_features_get_time_usec();
    const char *core_path            = path_get(RARCH_PATH_CORE);
    bool supports_savestate          = core_info_current_supports_savestate_nonintrusive();
+   bool host_request                = false;
 
    RARCH_LOG("[LOAD_STATE_C] content_load_state enter support=%s autoload=%s backup=%s core=%s path=%s\n",
          supports_savestate ? "true" : "false",
@@ -1661,6 +1719,11 @@ bool content_load_state(const char *path,
       state->flags             |= SAVE_TASK_FLAG_LOAD_TO_BACKUP_BUFF;
    if (autoload)
       state->flags             |= SAVE_TASK_FLAG_AUTOLOAD;
+   /* Gamuroid: only a plain load (no autoload, no backup) armed by the host reports its result. */
+   if (     !autoload
+         && !load_to_backup_buffer
+         && __atomic_load_n(&s_gamuroid_state_load_host_armed, __ATOMIC_ACQUIRE))
+      state->gamuroid_host_request = true;
    state->state_slot            = settings->ints.state_slot;
    if (video_st->frame_cache_data && (video_st->frame_cache_data == RETRO_HW_FRAME_BUFFER_VALID))
       state->flags             |= SAVE_TASK_FLAG_HAS_VALID_FB;
@@ -1682,7 +1745,24 @@ bool content_load_state(const char *path,
    else
       task->flags               &= ~RETRO_TASK_FLG_MUTE;
 
-   task_queue_push(task);
+   host_request = state->gamuroid_host_request; /* read before the push: a pushed task may finish and free `state` */
+   if (!task_queue_push(task))
+   {
+      /* Gamuroid: another blocking task is active, so this one never runs and no result would ever
+       * arrive. Refuse a host-requested load instead of reporting a queued load that does not exist;
+       * every other caller keeps its previous behaviour. */
+      if (host_request)
+      {
+         RARCH_ERR("[State]: load of \"%s\" not queued: another blocking task is active.\n", path);
+         if (task->title)
+            task_free_title(task);
+         free(task);
+         free(state);
+         return false;
+      }
+   }
+   else if (host_request)
+      __atomic_store_n(&s_gamuroid_state_load_host_consumed, true, __ATOMIC_RELEASE);
 
    RARCH_LOG("[LOAD_STATE_C] content_load_state submitted elapsedMs=%.1f\n",
          (double)(cpu_features_get_time_usec() - start_usec) / 1000.0);

@@ -19,6 +19,34 @@ extern NSString * const GamuroidCoreFilesMissingNotification;
 extern NSString * const LibretroSaveStateRevisionMismatchNotification;
 extern NSString * const LibretroSaveStateLoadFailedNotification;
 
+/// Result of a state load requested with -loadState:. Posted on the main queue, once per load that
+/// -loadState: accepted (returned YES), after RetroArch's load task finished. userInfo: the path given to
+/// -loadState: (GamuroidSaveStateLoadResultPathKey, NSString) and the outcome
+/// (GamuroidSaveStateLoadResultSuccessKey, NSNumber BOOL: YES = the core's retro_unserialize returned true;
+/// NO = unreadable file, bad wrapper or a core that refused the data). A load that -loadState: refused
+/// (returned NO) posts nothing, and neither do autoload and undo. If the core's own
+/// "[GAMUROID_STATE_LOAD] result=fail" line exists, GamuroidSaveStateCoreFailureNotification of the same
+/// load is posted first.
+extern NSString * const GamuroidSaveStateLoadResultNotification;
+extern NSString * const GamuroidSaveStateLoadResultPathKey;
+extern NSString * const GamuroidSaveStateLoadResultSuccessKey;
+
+/// The core reported why a state load failed (core log line at ERROR level
+/// "[GAMUROID_STATE_LOAD] result=fail stage=<pre|post> reason=<token>"). userInfo:
+/// GamuroidSaveStateCoreFailureStageKey (NSString "pre" = the running game continues, "post" = the old
+/// system was torn down and the title has to be relaunched; an unreadable stage counts as "post") and
+/// GamuroidSaveStateCoreFailureLineKey (NSString, the whole line). Posted for the whole session, in order
+/// with the load result notification above.
+extern NSString * const GamuroidSaveStateCoreFailureNotification;
+extern NSString * const GamuroidSaveStateCoreFailureStageKey;
+extern NSString * const GamuroidSaveStateCoreFailureLineKey;
+
+/// The core reported a lost Vulkan device (core log line at ERROR level
+/// "[GAMUROID_DEVICE_LOST] site=<present|wait|submit|refresh>"). userInfo: GamuroidCoreDeviceLostLineKey
+/// (NSString, the whole line). The GamuroidRetroHostDidStopNotification follows when the core asks to stop.
+extern NSString * const GamuroidCoreDeviceLostNotification;
+extern NSString * const GamuroidCoreDeviceLostLineKey;
+
 #pragma mark - Joypad buttons
 
 /// Libretro RETRO_DEVICE_ID_JOYPAD_* ids. Also the bit index in the virtual pad and the button number in
@@ -94,6 +122,10 @@ typedef NS_ENUM(NSUInteger, LibretroAzaharAcceptedInput) {
 @property(nonatomic, assign, readonly) BOOL isCoreReadyForContentLoad;
 @property(nonatomic, assign, readonly) BOOL coreLoopRunning;
 @property(nonatomic, assign, readonly) unsigned long long videoFrameCount;
+/// Number of video frames the core handed to the frontend in this session: +1 per frame (duplicated frames
+/// included), 0 at session start. Safe to read from any thread (unlike videoFrameCount, which is main-thread
+/// only by convention).
++ (uint64_t)threadSafeFrameCount;
 /// The one bridge object. Alias of the process-wide instance; it is created on first use.
 + (instancetype)sharedInstance;
 
@@ -174,11 +206,17 @@ typedef NS_ENUM(NSUInteger, LibretroAzaharAcceptedInput) {
 - (void)pauseSession NS_SWIFT_NAME(pauseSession());
 - (void)resumeSession NS_SWIFT_NAME(resumeSession());
 - (void)endSession NS_SWIFT_NAME(endSession());
-/// Save and restore states. For loadState: YES means the request was accepted, not that the state is valid.
+/// Save and restore states. For loadState: YES means the request was accepted, not that the state is valid:
+/// the result arrives later in GamuroidSaveStateLoadResultNotification. NO means nothing was queued.
 - (BOOL)saveState:(void (^ _Nullable)(NSString * _Nullable path))completion;
 - (BOOL)saveStateAsyncControlled:(void (^ _Nullable)(NSString * _Nullable path))completion;
 - (BOOL)loadState:(NSString *)path;
 - (void)snapshot:(void (^)(UIImage *))completion;
+/// Waits, for at most `timeout` seconds, until every command the frontend submitted to its Vulkan queue
+/// has completed. Main thread only; never calls into the core. YES: nothing is pending (also when there is
+/// no running session or the video driver is not Vulkan). NO: timeout, or the device is lost.
+/// Logs "[GAMUROID_GPU_QUIESCE] result=<ok|timeout|lost|skip> ms=<n>".
+- (BOOL)quiesceGPUWithTimeout:(NSTimeInterval)timeout;
 /// YES = audio on (the name is historical).
 - (void)mute:(BOOL)mute;
 - (void)fastForward:(float)rate;

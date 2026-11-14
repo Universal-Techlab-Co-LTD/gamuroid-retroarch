@@ -25,6 +25,7 @@
 #endif
 
 #include "../input_driver.h"
+#include "gamuroid_pointer_gate.h"
 
 /* True while the running core has an accelerometer or gyroscope switched on for this port;
  * false otherwise, at process start and for ports 64 and above. Main thread only. */
@@ -58,6 +59,8 @@ typedef struct
    int16_t mouse_wl;
    int16_t mouse_wr;
    bool mouse_grabbed;
+   /* Gamuroid: holds a host pointer press that follows a lift no input poll has seen. */
+   gamuroid_pointer_gate_t pointer_gate;
 } cocoa_input_data_t;
 
 #endif

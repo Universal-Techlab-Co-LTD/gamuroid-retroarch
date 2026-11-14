@@ -429,6 +429,12 @@ static void cocoa_input_poll(void *data)
    if (!apple)
       return;
 
+   /* Gamuroid: a host pointer press held behind an unpolled lift becomes visible now,
+    * one poll after the lift (see gamuroid_pointer_gate.h). */
+   if (gamuroid_pointer_gate_poll(&apple->pointer_gate,
+            &apple->touches[0].screen_x, &apple->touches[0].screen_y))
+      apple->touch_count = 1;
+
    apple->mouse_rel_x = apple->window_pos_x - apple->mouse_x_last;
    apple->mouse_x_last = apple->window_pos_x;
 

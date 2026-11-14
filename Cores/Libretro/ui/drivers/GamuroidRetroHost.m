@@ -66,6 +66,10 @@
 
 #include "../../gfx/video_driver.h"
 
+#ifdef HAVE_VULKAN
+#include "../../gfx/common/vulkan_common.h"
+#endif
+
 #pragma mark - Notification names (each string equals its symbol)
 
 NSString * const GamuroidWFCOnlineNotification = @"GamuroidWFCOnlineNotification";
@@ -74,6 +78,14 @@ NSString * const GamuroidRetroHostDidStopNotification = @"GamuroidRetroHostDidSt
 NSString * const LibretroSaveStateLoadFailedNotification = @"LibretroSaveStateLoadFailedNotification";
 NSString * const LibretroSaveStateRevisionMismatchNotification = @"LibretroSaveStateRevisionMismatchNotification";
 NSString * const GamuroidCoreFilesMissingNotification = @"GamuroidCoreFilesMissingNotification";
+NSString * const GamuroidSaveStateLoadResultNotification = @"GamuroidSaveStateLoadResultNotification";
+NSString * const GamuroidSaveStateLoadResultPathKey = @"GamuroidSaveStateLoadResultPathKey";
+NSString * const GamuroidSaveStateLoadResultSuccessKey = @"GamuroidSaveStateLoadResultSuccessKey";
+NSString * const GamuroidSaveStateCoreFailureNotification = @"GamuroidSaveStateCoreFailureNotification";
+NSString * const GamuroidSaveStateCoreFailureStageKey = @"GamuroidSaveStateCoreFailureStageKey";
+NSString * const GamuroidSaveStateCoreFailureLineKey = @"GamuroidSaveStateCoreFailureLineKey";
+NSString * const GamuroidCoreDeviceLostNotification = @"GamuroidCoreDeviceLostNotification";
+NSString * const GamuroidCoreDeviceLostLineKey = @"GamuroidCoreDeviceLostLineKey";
 
 static NSString * const kMessageUserInfoKey = @"message";
 
@@ -103,6 +115,27 @@ static void HandleCoreShutdownRequest(void)
     PostOnMainQueue(GamuroidRetroHostDidStopNotification, nil);
 }
 
+#pragma mark - State-load result (hook in tasks/task_save.c, plan C-1)
+
+typedef void (*StateLoadResultFn)(const char *path, bool ok);
+extern void gamuroid_state_load_set_result_handler(StateLoadResultFn handler);
+extern void gamuroid_state_load_arm_host_request(void);
+extern bool gamuroid_state_load_disarm_host_request(void);
+
+/// Runs on the thread that finishes RetroArch's load task, after retro_unserialize returned. It goes to the
+/// main queue the same way HandleCoreLogLine does, so a core failure line of this load (emitted while
+/// retro_unserialize was running, on this same thread) is already queued ahead of it: the main queue is FIFO
+/// for blocks enqueued in program order from one thread.
+static void HandleStateLoadResult(const char *path, bool ok)
+{
+    @autoreleasepool {
+        PostOnMainQueue(GamuroidSaveStateLoadResultNotification, @{
+            GamuroidSaveStateLoadResultPathKey: StringFromCoreUTF8(path),
+            GamuroidSaveStateLoadResultSuccessKey: @(ok),
+        });
+    }
+}
+
 #pragma mark - melonDS DS online state (core exports gamuroid_net_state_get / gamuroid_net_state_listen)
 
 /// Code 2 = associated with the emulated access point (online); 0 and 1 are offline.
@@ -126,15 +159,60 @@ static void HandleNetStateChange(int code)
     PostNetState(code);
 }
 
-/// Process-global switch of the core log monitor (written on main, read on core threads).
+/// App-requested switch of the legacy core log rules (written on main, read on core threads). Only
+/// -setCoreLogObserver: changes it; the app turns it on around a state load.
 static atomic_bool sLogMonitorEnabled = false;
+/// Host-owned: YES from beginSession to endSession. The Gamuroid core lines (state load failure, device
+/// lost) are watched for the whole session, because they can appear at any time of play.
+static atomic_bool sSessionLogMonitor = false;
+
+/// Value of "stage=" in a [GAMUROID_STATE_LOAD] line: "pre" or "post". Anything else (missing, misspelled)
+/// is "post": the safe reading, because it makes the app relaunch the title instead of trusting a core
+/// that may have torn its system down.
+static NSString *StateLoadStageFromLine(const char *line)
+{
+    const char *stage = strstr(line, "stage=");
+    if (stage != NULL) {
+        stage += strlen("stage=");
+        if (strncmp(stage, "pre", 3) == 0 && (stage[3] == '\0' || stage[3] == ' ' || stage[3] == '\n'))
+            return @"pre";
+        if (strncmp(stage, "post", 4) == 0 && (stage[4] == '\0' || stage[4] == ' ' || stage[4] == '\n'))
+            return @"post";
+    }
+    NSLog(@"[GAMUROID_STATE_LOAD] stage missing or unknown in core line; treating it as post");
+    return @"post";
+}
 
 static void HandleCoreLogLine(enum retro_log_level level, const char *fmt, va_list args)
 {
-    if (!atomic_load_explicit(&sLogMonitorEnabled, memory_order_relaxed))
+#ifdef DEBUG
+    /* Gamuroid DEBUG: the core's 3DS measurement lines ([GAMUROID_3DS_*], [TransCacheStat] activation counters,
+     * [GAMUROID_STATE_SAVE_TIME]) reach the
+     * device only through os_log, which prints "%s" arguments as <private> off-device. Echo them to stdout, where
+     * a console-attached harness reads them. Any level; formatted from a copy because the rules below consume args. */
+    if (fmt != NULL && atomic_load_explicit(&sSessionLogMonitor, memory_order_relaxed)) {
+        va_list echoArgs;
+        char echoLine[kMonitoredLogLineBytes];
+        va_copy(echoArgs, args);
+        int echoLength = vsnprintf(echoLine, sizeof(echoLine), fmt, echoArgs);
+        va_end(echoArgs);
+        if (echoLength >= 0 && (strstr(echoLine, "[GAMUROID_3DS_") != NULL || strstr(echoLine, "[TransCacheStat]") != NULL ||
+                                strstr(echoLine, "[GAMUROID_STATE_SAVE_TIME]") != NULL)) {
+            fputs(echoLine, stdout);
+            if (echoLine[0] != '\0' && echoLine[strlen(echoLine) - 1] != '\n')
+                fputc('\n', stdout);
+            fflush(stdout);
+        }
+    }
+#endif
+    BOOL legacyRules = atomic_load_explicit(&sLogMonitorEnabled, memory_order_relaxed);
+    BOOL sessionRules = atomic_load_explicit(&sSessionLogMonitor, memory_order_relaxed);
+    if (!legacyRules && !sessionRules)
         return;
-    /* Only ERROR and WARN lines can match a rule below; skip formatting everything else. */
-    if (level != RETRO_LOG_ERROR && level != RETRO_LOG_WARN)
+    /* Only ERROR and WARN lines can match a rule below; skip formatting everything else. The session
+     * rules (state load failure, device lost) only match ERROR lines, so a WARN is formatted only while the
+     * legacy observer is on (its "different revision" rule). */
+    if (level != RETRO_LOG_ERROR && !(legacyRules && level == RETRO_LOG_WARN))
         return;
     if (fmt == NULL)
         return;
@@ -145,14 +223,24 @@ static void HandleCoreLogLine(enum retro_log_level level, const char *fmt, va_li
 
     NSString *name = nil;
     BOOL attachLine = NO;
+    BOOL stateLoadFailure = NO;
+    BOOL deviceLost = NO;
     if (level == RETRO_LOG_ERROR) {
-        if (strstr(line, "Required files are missing,") != NULL) {
+        if (sessionRules && strstr(line, "[GAMUROID_STATE_LOAD] result=fail") != NULL) {
+            name = GamuroidSaveStateCoreFailureNotification;
+            stateLoadFailure = YES;
+        } else if (sessionRules && strstr(line, "[GAMUROID_DEVICE_LOST]") != NULL) {
+            name = GamuroidCoreDeviceLostNotification;
+            deviceLost = YES;
+        } else if (!legacyRules) {
+            return;
+        } else if (strstr(line, "Required files are missing,") != NULL) {
             name = GamuroidCoreFilesMissingNotification;
         } else if (strstr(line, "Failed to load state") != NULL) {
             name = LibretroSaveStateLoadFailedNotification;
             attachLine = YES;
         }
-    } else if (strstr(line, "different revision") != NULL) {
+    } else if (legacyRules && strstr(line, "different revision") != NULL) {
         name = LibretroSaveStateRevisionMismatchNotification;
         attachLine = YES;
     }
@@ -163,7 +251,16 @@ static void HandleCoreLogLine(enum retro_log_level level, const char *fmt, va_li
         NSString *text = [NSString stringWithUTF8String:line];
         if (text == nil)
             return; /* not decodable (possibly cut inside a multi-byte sequence) */
-        PostOnMainQueue(name, attachLine ? @{ kMessageUserInfoKey: text } : nil);
+        NSDictionary *userInfo = nil;
+        if (stateLoadFailure) {
+            userInfo = @{ GamuroidSaveStateCoreFailureStageKey: StateLoadStageFromLine(line),
+                          GamuroidSaveStateCoreFailureLineKey: text };
+        } else if (deviceLost) {
+            userInfo = @{ GamuroidCoreDeviceLostLineKey: text };
+        } else if (attachLine) {
+            userInfo = @{ kMessageUserInfoKey: text };
+        }
+        PostOnMainQueue(name, userInfo);
     }
 }
 
@@ -397,6 +494,72 @@ static inline const char *LibretroBoolString(BOOL value)
     return value ? "YES" : "NO";
 }
 
+#ifdef HAVE_VULKAN
+/// The frontend's Vulkan context while a Vulkan video driver is active, else NULL. Main thread only.
+static vulkan_context_t *CurrentVulkanContext(void)
+{
+    video_driver_state_t *videoState = video_state_get_ptr();
+    if (videoState == NULL || (videoState->flags & VIDEO_FLAG_ACTIVE) == 0
+            || videoState->current_video != &video_vulkan || videoState->data == NULL)
+        return NULL;
+    return ((vk_t *)videoState->data)->context;
+}
+
+/// A fence whose wait timed out stays unsignaled, so it may not be destroyed yet: it is kept here (with the
+/// device it belongs to) and reclaimed by the next call once the GPU has caught up. endSession settles it
+/// before the device goes away, so a handle never outlives its session. Main thread only.
+static VkFence sQuiesceLeakedFence = VK_NULL_HANDLE;
+static VkDevice sQuiesceLeakedDevice = VK_NULL_HANDLE;
+
+static void ReclaimQuiesceFence(VkDevice currentDevice)
+{
+    if (sQuiesceLeakedFence == VK_NULL_HANDLE)
+        return;
+    if (sQuiesceLeakedDevice != currentDevice) {
+        /* The device it belonged to was destroyed with its session; nothing is left to free. */
+        sQuiesceLeakedFence = VK_NULL_HANDLE;
+        sQuiesceLeakedDevice = VK_NULL_HANDLE;
+        return;
+    }
+    if (vkGetFenceStatus(currentDevice, sQuiesceLeakedFence) != VK_NOT_READY) {
+        vkDestroyFence(currentDevice, sQuiesceLeakedFence, NULL);
+        sQuiesceLeakedFence = VK_NULL_HANDLE;
+        sQuiesceLeakedDevice = VK_NULL_HANDLE;
+    }
+}
+
+/// Takes the frontend's queue lock without waiting longer than @p deadline (CACurrentMediaTime seconds): a
+/// core thread stuck inside a queue call must not hang the main thread.
+static BOOL LockQueueUntil(slock_t *lock, CFTimeInterval deadline)
+{
+    if (lock == NULL)
+        return YES;
+    while (!slock_try_lock(lock)) {
+        if (CACurrentMediaTime() >= deadline)
+            return NO;
+        struct timespec pause = { 0, 1000000 }; /* 1 ms poll of a bounded wait, not a delay that masks a race */
+        nanosleep(&pause, NULL);
+    }
+    return YES;
+}
+
+/// Called at the start of endSession, while the session's device still exists. Destroys the kept fence when
+/// the GPU has already finished it; if it is still pending the handle is only forgotten (a leaked fence
+/// handle is harmless, a call on a fence of a destroyed device is not). Either way nothing is kept across
+/// sessions, so a later device allocated at the same address can never be matched with it.
+static void SettleQuiesceFenceAtSessionEnd(void)
+{
+    if (sQuiesceLeakedFence == VK_NULL_HANDLE)
+        return;
+    vulkan_context_t *context = CurrentVulkanContext();
+    if (context != NULL && context->device == sQuiesceLeakedDevice
+            && vkGetFenceStatus(context->device, sQuiesceLeakedFence) != VK_NOT_READY)
+        vkDestroyFence(context->device, sQuiesceLeakedFence, NULL);
+    sQuiesceLeakedFence = VK_NULL_HANDLE;
+    sQuiesceLeakedDevice = VK_NULL_HANDLE;
+}
+#endif /* HAVE_VULKAN */
+
 @interface GamuroidRetroHost()
 
 @property (assign) BOOL isRunning;
@@ -543,6 +706,11 @@ static inline const char *LibretroBoolString(BOOL value)
 #pragma mark Lifecycle
 
 - (UIViewController *)beginSessionWithSaveDirectory:(NSString *_Nullable)saveFolderOverride {
+    /* C-5: the frame counter starts at 0 for this session. Nothing renders yet (the previous session is over
+     * and its core is unloaded), and the video driver resets it again when it initializes. */
+    video_driver_state_t *videoState = video_state_get_ptr();
+    if (videoState != NULL)
+        __atomic_store_n(&videoState->frame_count, (uint64_t)0, __ATOMIC_RELAXED);
     [[self host] hostBeginSessionWithSaveDir:saveFolderOverride];
     // Re-wire any Azahar keyboard callbacks that were registered before the
     // core dylib was dlopen'd. No-op if handle is still null or no callbacks pending.
@@ -557,6 +725,10 @@ static inline const char *LibretroBoolString(BOOL value)
     }
     gamuroid_register_shutdown_callback(HandleCoreShutdownRequest);
     runloop_set_gamuroid_core_log_handler(HandleCoreLogLine);
+    /* Watch the Gamuroid core lines (state load failure, device lost) for the whole session; the legacy
+     * rules keep following -setCoreLogObserver:. Cleared in endSession. */
+    atomic_store_explicit(&sSessionLogMonitor, true, memory_order_relaxed);
+    gamuroid_state_load_set_result_handler(HandleStateLoadResult);
     return [CocoaView get];
 }
 
@@ -597,10 +769,15 @@ static inline const char *LibretroBoolString(BOOL value)
               [self videoFrameCount]);
     }
     self.isRunning = NO;
+#ifdef HAVE_VULKAN
+    SettleQuiesceFenceAtSessionEnd();
+#endif
 
     gamuroid_register_shutdown_callback(NULL);
     runloop_set_gamuroid_core_log_handler(NULL);
     atomic_store_explicit(&sLogMonitorEnabled, false, memory_order_relaxed);
+    atomic_store_explicit(&sSessionLogMonitor, false, memory_order_relaxed);
+    gamuroid_state_load_set_result_handler(NULL);
 
     sNetStateMonitorActive = NO;
     // Cancel any in-flight keyboard request in the core before tearing the
@@ -710,7 +887,19 @@ static inline const char *LibretroBoolString(BOOL value)
               LibretroBoolString([self coreLoopRunning]),
               [self videoFrameCount]);
     }
+    /* C-1: mark the load task content_load_state() creates inside hostRestoreStateAtPath: (same thread, same
+     * call), so its final result is reported once through GamuroidSaveStateLoadResultNotification. */
+    gamuroid_state_load_arm_host_request();
     BOOL result = [[self host] hostRestoreStateAtPath:path];
+    BOOL queued = gamuroid_state_load_disarm_host_request();
+    if (result && !queued) {
+        /* Accepted but no marked task exists: no result would ever arrive, so refuse instead of lying. */
+        NSLog(@"[GAMUROID_STATE_LOAD] host accepted the load but queued no reportable task; refusing path=%@", path ?: @"<nil>");
+        result = NO;
+    } else if (!result && queued) {
+        /* Cannot happen (a queued task makes content_load_state return true); the result is still reported. */
+        NSLog(@"[GAMUROID_STATE_LOAD] host refused a load that queued a task; the task result will still be reported path=%@", path ?: @"<nil>");
+    }
     if ([self shouldTraceFlycastRuntime]) {
         NSLog(@"[DC_TRACE] loadState result=%s corePath=%@ path=%@",
               LibretroBoolString(result),
@@ -730,6 +919,80 @@ static inline const char *LibretroBoolString(BOOL value)
 #else
     [[self host] hostCaptureFrame:completion];
 #endif
+}
+
+#pragma mark GPU quiesce (plan C-4)
+
+- (BOOL)quiesceGPUWithTimeout:(NSTimeInterval)timeout
+{
+    CFTimeInterval start = CACurrentMediaTime();
+    const char *result = "skip";
+    BOOL ok = YES;
+    int vkCode = 0;
+#ifdef HAVE_VULKAN
+    vulkan_context_t *context = self.isLibretroInitialized ? CurrentVulkanContext() : NULL;
+    if (context != NULL && context->device != VK_NULL_HANDLE && context->queue != VK_NULL_HANDLE) {
+        CFTimeInterval deadline = start + MAX(timeout, 0.0);
+        VkDevice device = context->device;
+        VkFence fence = VK_NULL_HANDLE;
+        VkFenceCreateInfo fenceInfo = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        ReclaimQuiesceFence(device);
+        VkResult status = vkCreateFence(device, &fenceInfo, NULL, &fence);
+        if (status == VK_SUCCESS) {
+            /* An empty submit signals the fence only after everything submitted to this queue before it. */
+            VkSubmitInfo submit = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
+            BOOL submitted = NO;
+            if (LockQueueUntil(context->queue_lock, deadline)) {
+                status = vkQueueSubmit(context->queue, 1, &submit, fence);
+                if (context->queue_lock != NULL)
+                    slock_unlock(context->queue_lock);
+                if (status == VK_SUCCESS) {
+                    submitted = YES;
+                    CFTimeInterval remaining = MAX(deadline - CACurrentMediaTime(), 0.0);
+                    status = vkWaitForFences(device, 1, &fence, VK_TRUE, (uint64_t)(remaining * 1e9));
+                }
+            } else {
+                status = VK_TIMEOUT; /* queue lock still held by a core thread at the deadline */
+            }
+            if (submitted && status == VK_TIMEOUT) {
+                /* The fence is queued behind GPU work that has not finished: keep it, free it later. */
+                sQuiesceLeakedFence = fence;
+                sQuiesceLeakedDevice = device;
+            } else {
+                vkDestroyFence(device, fence, NULL);
+            }
+        }
+        if (status == VK_SUCCESS) {
+            result = "ok";
+        } else if (status == VK_TIMEOUT) {
+            result = "timeout";
+            ok = NO;
+        } else {
+            /* VK_ERROR_DEVICE_LOST, or any other failure that leaves the queue unusable: report "lost". */
+            result = "lost";
+            ok = NO;
+            vkCode = (int)status;
+        }
+    }
+#else
+    (void)timeout;
+#endif
+    long elapsedMs = (long)llround((CACurrentMediaTime() - start) * 1000.0);
+    if (vkCode != 0)
+        NSLog(@"[GAMUROID_GPU_QUIESCE] result=%s ms=%ld vk=%d", result, elapsedMs, vkCode);
+    else
+        NSLog(@"[GAMUROID_GPU_QUIESCE] result=%s ms=%ld", result, elapsedMs);
+    return ok;
+}
+
++ (uint64_t)threadSafeFrameCount
+{
+    video_driver_state_t *videoState = video_state_get_ptr();
+    if (videoState == NULL)
+        return 0;
+    /* video_driver_frame() adds one per frame the core hands over (duplicated frames included); the video
+     * driver resets it at init and beginSession at the start. The load only avoids a torn read. */
+    return __atomic_load_n(&videoState->frame_count, __ATOMIC_RELAXED);
 }
 
 - (void)mute:(BOOL)mute

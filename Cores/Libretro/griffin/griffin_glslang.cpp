@@ -12,16 +12,16 @@
  * symbols remain visible while glslang-specific symbols become hidden.
  *
  * Why this matters:
- * Both the main executable (this file) and PVDolphin.framework link
+ * Both the main executable (this file) and GamuDolphin.framework link
  * their own copy of glslang.  C++ weak/template/inline symbols
  * (TPoolAllocator::allocate, TIntermNode::operator new, template
  * instantiations of TIntermediate::addSwizzle) would normally leak
  * into the global namespace and get coalesced by the dynamic linker.
- * PVDolphin's emu-thread then calls the coalesced (Libretro) copy
+ * GamuDolphin's emu-thread then calls the coalesced (Libretro) copy
  * whose thread-local TPoolAllocator is uninitialised → crash.
  *
  * With -fvisibility=hidden, these glslang symbols are not exported,
- * so PVDolphin.framework resolves its own internal copy instead.
+ * so GamuDolphin.framework resolves its own internal copy instead.
  */
 #ifdef WANT_GLSLANG
 

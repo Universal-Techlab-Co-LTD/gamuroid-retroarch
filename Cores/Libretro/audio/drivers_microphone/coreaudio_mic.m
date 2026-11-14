@@ -173,16 +173,15 @@ static void coreaudio_microphone_restore_playback_category(void)
     settings_t *settings = config_get_ptr();
     bool respect_silent  = !settings || settings->bools.audio_respect_silent_mode;
     NSError *error       = nil;
-    AVAudioSessionCategoryOptions options =
-        AVAudioSessionCategoryOptionMixWithOthers |
-        AVAudioSessionCategoryOptionAllowBluetoothA2DP |
-        AVAudioSessionCategoryOptionAllowAirPlay;
-    [[AVAudioSession sharedInstance]
-        setCategory:respect_silent ? AVAudioSessionCategoryAmbient : AVAudioSessionCategoryPlayback
-        withOptions:options
-              error:&error];
-    if (error)
-        RARCH_ERR("[CoreAudio]: Failed to restore audio session category: %s\n",
+    /* AllowAirPlay / AllowBluetoothA2DP are valid only with PlayAndRecord and made the
+     * Playback request fail; Ambient always mixes and takes no option. */
+    AVAudioSessionCategory category = respect_silent
+        ? AVAudioSessionCategoryAmbient : AVAudioSessionCategoryPlayback;
+    AVAudioSessionCategoryOptions options = respect_silent
+        ? 0 : AVAudioSessionCategoryOptionMixWithOthers;
+    if (![[AVAudioSession sharedInstance] setCategory:category withOptions:options error:&error])
+        RARCH_ERR("[CoreAudio]: Failed to restore audio session category %s: %s\n",
+                  [category UTF8String],
                   [[error localizedDescription] UTF8String]);
 }
 #endif
